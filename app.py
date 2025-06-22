@@ -52,14 +52,16 @@ MODEL_CONFIG = {
     "gemini": {
         "enabled": True,
         "api_key": os.getenv("GEMINI_API_KEY"),
-        "model_name": "gemini-1.5-pro",
+        "model_name": "models/gemini-1.5-pro",
         "base_url": "https://generativelanguage.googleapis.com/v1",
-        "chat_endpoint": "/models/gemini-1.5-pro:generateContent",
+        "chat_endpoint": ":generateContent",
     },
-    "anthropic": {
-        "enabled": False,
-        "api_key": os.getenv("ANTHROPIC_API_KEY"),
-        "model_name": "claude-3-5-sonnet-latest",
+    "local": {
+        "enabled": True,
+        "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "base_url": None,
+        "chat_endpoint": None,
+        "api_key": None,
     },
 }
 DATA_FILE = "personal_data.json"
@@ -458,6 +460,7 @@ def get_google_creds(SCOPES):
     from google.oauth2.service_account import Credentials
     import tempfile
     import json
+
     environment = os.getenv("ENVIRONMENT", "local").lower()
     if environment == "local":
         creds_path = "service_account.json"
@@ -520,10 +523,22 @@ class LLMModel:
         self.chat_endpoint = model_config["chat_endpoint"]
         self.fallback_models = model_config.get("fallback_models", [])
         self.enabled = model_config["enabled"]
+        self.is_local = model_config.get("base_url") is None
+
+        if self.is_local:
+            from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+            self.tokenizer = AutoTokenizer.from_pretrained(model_config["model_name"])
+            self.model = AutoModelForCausalLM.from_pretrained(model_config["model_name"])
+            self.pipe = pipeline("text-generation", model=self.model, tokenizer=self.tokenizer)
 
     def run_sync(self, prompt):
+        if self.is_local:
+            result = self.pipe(prompt, max_new_tokens=512, temperature=0.7)
+            return result[0]["generated_text"]
+        
         if not self.enabled:
             raise Exception(f"{self.model_name} is disabled in MODEL_CONFIG")
+        
         if not self.api_key:
             raise Exception(
                 f"Missing API key for {self.model_name}. Check .env file or environment variables."
@@ -544,6 +559,8 @@ class LLMModel:
 
         models_to_try = [self.model_name] + self.fallback_models
         for model in models_to_try:
+            if self.model_name == 'gemini':
+                api_url = f"{self.base_url}/{model}{self.chat_endpoint}"
             payload["model"] = model
             try:
                 response = requests.post(api_url, headers=headers, json=payload)
@@ -580,7 +597,7 @@ def initialize_agent():
         raise Exception("No models enabled in MODEL_CONFIG")
 
     model_name = enabled_models[0]
-    print(f'Using model: {model_name}')
+    print(f"Using model: {model_name}")
     return LLMModel(MODEL_CONFIG[model_name])
 
 
@@ -589,16 +606,14 @@ def generate_document(job_description, document_type, agent):
     with open(DATA_FILE, "r") as f:
         data = json.load(f)
 
-
-
     if document_type == "Resume":
         # Removed this from prompt as it is longing the prompt thereby using more tokens
         # Web Search Results: {web_search_results}
-            # "overview": "A 2-3 sentence summary highlighting my most relevant skills, experiences, and achievements based on the job description. Use insights from the web search results to align with the company’s focus or job requirements.",
-            # "achievements": [
-            #     "Notable achievement 1",
-            #     "Notable achievement 2",
-            # ]
+        # "overview": "A 2-3 sentence summary highlighting my most relevant skills, experiences, and achievements based on the job description. Use insights from the web search results to align with the company’s focus or job requirements.",
+        # "achievements": [
+        #     "Notable achievement 1",
+        #     "Notable achievement 2",
+        # ]
         prompt = f"""
         Here is my personal portfolio data:
         Profile: {data['profile']['summary']}
@@ -694,13 +709,19 @@ def main():
 
     try:
         # Add dropdown for model selection
-        enabled_models = [name for name, config in MODEL_CONFIG.items() if config["enabled"]]
+        enabled_models = [
+            name for name, config in MODEL_CONFIG.items() if config["enabled"]
+        ]
         if not enabled_models:
             st.error("No models enabled in MODEL_CONFIG")
             return
         if "selected_model" not in st.session_state:
             st.session_state["selected_model"] = enabled_models[0]
-        selected_model = st.selectbox("Select Model", enabled_models, index=enabled_models.index(st.session_state["selected_model"]))
+        selected_model = st.selectbox(
+            "Select Model",
+            enabled_models,
+            index=enabled_models.index(st.session_state["selected_model"]),
+        )
         st.session_state["selected_model"] = selected_model
         agent = LLMModel(MODEL_CONFIG[selected_model])
     except Exception as e:
@@ -738,75 +759,149 @@ def main():
                     s = re.sub(r"^\s*```", "", s, flags=re.MULTILINE)
                     s = re.sub(r"^\s*//.*$", "", s, flags=re.MULTILINE)
                     s = re.sub(r",(\s*[}}\]])", r"\1", s)
-                    open_braces = s.count('{')
-                    close_braces = s.count('}')
+                    open_braces = s.count("{")
+                    close_braces = s.count("}")
                     if open_braces > close_braces:
-                        s += '}' * (open_braces - close_braces)
-                    open_brackets = s.count('[')
-                    close_brackets = s.count(']')
+                        s += "}" * (open_braces - close_braces)
+                    open_brackets = s.count("[")
+                    close_brackets = s.count("]")
                     if open_brackets > close_brackets:
-                        s += ']' * (open_brackets - close_brackets)
+                        s += "]" * (open_brackets - close_brackets)
                     return s.strip()
+
                 cleaned_doc = clean_json_string(document)
                 resume_json = json.loads(cleaned_doc)
                 # Set global role_name and company_name from model output if present
                 role_name = resume_json.get("role_name", "")
                 company_name = resume_json.get("company_name", "")
                 # Display role_name and company_name as editable text boxes
-                role_name_box = st.text_input("Role Name (extracted)", role_name, key="role_name_box")
-                company_name_box = st.text_input("Company Name (extracted)", company_name, key="company_name_box")
+                role_name_box = st.text_input(
+                    "Role Name (extracted)", role_name, key="role_name_box"
+                )
+                company_name_box = st.text_input(
+                    "Company Name (extracted)", company_name, key="company_name_box"
+                )
                 # Editable fields
                 work_experience = []
                 for i, exp in enumerate(resume_json.get("work_experience", [])):
-                    with st.expander(f"Experience {i+1}: {exp.get('role', '')} at {exp.get('company', '')}"):
-                        role = st.text_input("Role", exp.get("role", ""), key=f"role_{i}")
-                        company = st.text_input("Company", exp.get("company", ""), key=f"company_{i}")
-                        duration = st.text_input("Duration", exp.get("duration", ""), key=f"duration_{i}")
-                        bullets = st.text_area("Bullets (one per line)", "\n".join(exp.get("bullets", [])), height=120, key=f"bullets_{i}")
-                        work_experience.append({
-                            "role": role,
-                            "company": company,
-                            "duration": duration,
-                            "bullets": [b for b in bullets.split("\n") if b.strip()]
-                        })
+                    with st.expander(
+                        f"Experience {i+1}: {exp.get('role', '')} at {exp.get('company', '')}"
+                    ):
+                        role = st.text_input(
+                            "Role", exp.get("role", ""), key=f"role_{i}"
+                        )
+                        company = st.text_input(
+                            "Company", exp.get("company", ""), key=f"company_{i}"
+                        )
+                        duration = st.text_input(
+                            "Duration", exp.get("duration", ""), key=f"duration_{i}"
+                        )
+                        bullets = st.text_area(
+                            "Bullets (one per line)",
+                            "\n".join(exp.get("bullets", [])),
+                            height=120,
+                            key=f"bullets_{i}",
+                        )
+                        work_experience.append(
+                            {
+                                "role": role,
+                                "company": company,
+                                "duration": duration,
+                                "bullets": [
+                                    b for b in bullets.split("\n") if b.strip()
+                                ],
+                            }
+                        )
                 st.markdown("**Projects**")
                 projects = []
                 for i, proj in enumerate(resume_json.get("projects", [])):
                     with st.expander(f"Project {i+1}: {proj.get('name', '')}"):
-                        name = st.text_input("Name", proj.get("name", ""), key=f"proj_name_{i}")
-                        description = st.text_area("Description", proj.get("description", ""), height=80, key=f"proj_desc_{i}")
-                        technologies = st.text_input("Technologies (comma separated)", ", ".join(proj.get("technologies", [])), key=f"proj_tech_{i}")
-                        projects.append({
-                            "name": name,
-                            "description": description,
-                            "technologies": [t.strip() for t in technologies.split(",") if t.strip()]
-                        })
+                        name = st.text_input(
+                            "Name", proj.get("name", ""), key=f"proj_name_{i}"
+                        )
+                        description = st.text_area(
+                            "Description",
+                            proj.get("description", ""),
+                            height=80,
+                            key=f"proj_desc_{i}",
+                        )
+                        technologies = st.text_input(
+                            "Technologies (comma separated)",
+                            ", ".join(proj.get("technologies", [])),
+                            key=f"proj_tech_{i}",
+                        )
+                        projects.append(
+                            {
+                                "name": name,
+                                "description": description,
+                                "technologies": [
+                                    t.strip()
+                                    for t in technologies.split(",")
+                                    if t.strip()
+                                ],
+                            }
+                        )
                 st.markdown("**Skills**")
                 skills = {}
                 for cat, skill_list in resume_json.get("skills", {}).items():
-                    val = st.text_input(f"{cat} Skills (comma separated)", ", ".join(skill_list), key=f"skills_{cat}")
+                    val = st.text_input(
+                        f"{cat} Skills (comma separated)",
+                        ", ".join(skill_list),
+                        key=f"skills_{cat}",
+                    )
                     skills[cat] = [s.strip() for s in val.split(",") if s.strip()]
                 # Download updated JSON and replace placeholders in Google Doc
                 updated_json = {
                     "work_experience": work_experience,
                     "projects": projects,
-                    "skills": skills
+                    "skills": skills,
                 }
                 file_name = f"{document_type.lower()}_{uuid.uuid4()}.json"
                 # Google Docs integration for Resume
                 st.markdown("---")
                 st.markdown("### Google Docs Resume Export")
-                doc_id_input = st.text_input("Google Doc Template ID (for Resume export)", value="17jbwEwv7GknVg9Q1JnYnpli8aYr9GTOblGZgSbt_jcA", key="resume_doc_id")
-                font_family = st.text_input("Font Family", "Arial", key="resume_font_family")
-                font_size = st.number_input("Font Size (pt)", min_value=8, max_value=48, value=11, key="resume_font_size")
+                doc_id_input = st.text_input(
+                    "Google Doc Template ID (for Resume export)",
+                    value="17jbwEwv7GknVg9Q1JnYnpli8aYr9GTOblGZgSbt_jcA",
+                    key="resume_doc_id",
+                )
+                font_family = st.text_input(
+                    "Font Family", "Arial", key="resume_font_family"
+                )
+                font_size = st.number_input(
+                    "Font Size (pt)",
+                    min_value=8,
+                    max_value=48,
+                    value=11,
+                    key="resume_font_size",
+                )
                 bold = st.checkbox("Bold", value=False, key="resume_bold")
                 # Define placeholder_map here
                 placeholder_map = {
-                    "SKILLS": "\n".join([f"{cat}: {', '.join(skills[cat])}" for cat in skills]),
-                    "PROJECTS": "\n".join([f"{proj.get('name', '')}: {proj.get('description', '')[:-1]} using {', '.join(proj.get('technologies', []))}" for proj in projects]),
-                    "EXPERIENCE1": "\n".join(work_experience[0]["bullets"]) if len(work_experience) > 0 else "",
-                    "EXPERIENCE2": "\n".join(work_experience[1]["bullets"]) if len(work_experience) > 1 else "",
-                    "EXPERIENCE3": "\n".join(work_experience[2]["bullets"]).strip() if len(work_experience) > 2 else "",
+                    "SKILLS": "\n".join(
+                        [f"{cat}: {', '.join(skills[cat])}" for cat in skills]
+                    ),
+                    "PROJECTS": "\n".join(
+                        [
+                            f"{proj.get('name', '')}: {proj.get('description', '')[:-1]} using {', '.join(proj.get('technologies', []))}"
+                            for proj in projects
+                        ]
+                    ),
+                    "EXPERIENCE1": (
+                        "\n".join(work_experience[0]["bullets"])
+                        if len(work_experience) > 0
+                        else ""
+                    ),
+                    "EXPERIENCE2": (
+                        "\n".join(work_experience[1]["bullets"])
+                        if len(work_experience) > 1
+                        else ""
+                    ),
+                    "EXPERIENCE3": (
+                        "\n".join(work_experience[2]["bullets"]).strip()
+                        if len(work_experience) > 2
+                        else ""
+                    ),
                 }
                 if st.button("Generate PDF", key="resume_download_btn"):
                     if doc_id_input:
@@ -816,9 +911,11 @@ def main():
                                 placeholder_map,
                                 font_family,
                                 font_size,
-                                bold
+                                bold,
                             )
-                            st.success("Resume PDF generated from a duplicate of your template! Download will start below.")
+                            st.success(
+                                "Resume PDF generated from a duplicate of your template! Download will start below."
+                            )
                             st.download_button(
                                 label="Download Resume PDF",
                                 data=pdf_bytes,
@@ -827,7 +924,15 @@ def main():
                             )
                             # Reset session state for next resume
                             for k in list(st.session_state.keys()):
-                                if k.startswith("role_") or k.startswith("company_") or k.startswith("duration_") or k.startswith("bullets_") or k.startswith("proj_") or k.startswith("skills_") or k.startswith("ach_"):
+                                if (
+                                    k.startswith("role_")
+                                    or k.startswith("company_")
+                                    or k.startswith("duration_")
+                                    or k.startswith("bullets_")
+                                    or k.startswith("proj_")
+                                    or k.startswith("skills_")
+                                    or k.startswith("ach_")
+                                ):
                                     del st.session_state[k]
                         except Exception as e:
                             st.error(f"Failed to generate/download PDF: {str(e)}")
@@ -854,6 +959,7 @@ def main():
                 mime="text/plain",
             )
 
+
 def generate_and_download_resume_pdf_via_duplicate(
     template_doc_id, placeholder_map, font_family="Arial", font_size=11, bold=False
 ):
@@ -868,6 +974,7 @@ def generate_and_download_resume_pdf_via_duplicate(
     import time
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
+
     SCOPES = [
         "https://www.googleapis.com/auth/documents",
         "https://www.googleapis.com/auth/drive",
@@ -876,27 +983,33 @@ def generate_and_download_resume_pdf_via_duplicate(
     docs_service = build("docs", "v1", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
     # 1. Duplicate the doc
-    copied_file = drive_service.files().copy(
-        fileId=template_doc_id,
-        body={"name": f"Resume Export {int(time.time())}"}
-    ).execute()
-    duplicate_doc_id = copied_file['id']
+    copied_file = (
+        drive_service.files()
+        .copy(
+            fileId=template_doc_id, body={"name": f"Resume Export {int(time.time())}"}
+        )
+        .execute()
+    )
+    duplicate_doc_id = copied_file["id"]
     # 2. Replace placeholders in the duplicate
     requests = []
     for ph, val in placeholder_map.items():
-        requests.append({
-            "replaceAllText": {
-                "containsText": {"text": f"{{{{{ph}}}}}", "matchCase": True},
-                "replaceText": val
+        requests.append(
+            {
+                "replaceAllText": {
+                    "containsText": {"text": f"{{{{{ph}}}}}", "matchCase": True},
+                    "replaceText": val,
+                }
             }
-        })
+        )
     if requests:
         docs_service.documents().batchUpdate(
-            documentId=duplicate_doc_id,
-            body={"requests": requests}
+            documentId=duplicate_doc_id, body={"requests": requests}
         ).execute()
     # 3. Download as PDF
-    request = drive_service.files().export_media(fileId=duplicate_doc_id, mimeType='application/pdf')
+    request = drive_service.files().export_media(
+        fileId=duplicate_doc_id, mimeType="application/pdf"
+    )
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
@@ -907,6 +1020,7 @@ def generate_and_download_resume_pdf_via_duplicate(
     # 4. Delete the duplicate
     drive_service.files().delete(fileId=duplicate_doc_id).execute()
     return pdf_bytes
+
 
 if __name__ == "__main__":
     main()
