@@ -15,6 +15,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+import tempfile
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -443,6 +444,26 @@ personal_data = {
 }
 
 
+def get_google_creds(SCOPES):
+    import os, json
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    environment = os.getenv("ENVIRONMENT", "local").lower()
+    if environment == "local":
+        creds_path = "creds.json"
+    else:
+        creds_json = os.getenv("CREDS_JSON")
+        if not creds_json:
+            raise RuntimeError("CREDS_JSON environment variable not set!")
+        # Write creds_json to a temp file
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.write(creds_json.encode())
+        tmp.close()
+        creds_path = tmp.name
+    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+    creds = flow.run_local_server(port=0)
+    return creds
+
+
 def replace_placeholder_with_text(
     doc_id, placeholder, replacement, font_family="Arial", font_size=11, bold=False
 ):
@@ -467,8 +488,7 @@ def replace_placeholder_with_text(
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("creds.json", SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = get_google_creds(SCOPES)
         with open("token.json", "w") as token:
             token.write(creds.to_json())
     service = build("docs", "v1", credentials=creds)
@@ -920,10 +940,7 @@ def get_document_content(doc_id):
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "creds.json", SCOPES
-            )
-            creds = flow.run_local_server(port=0)
+            creds = get_google_creds(SCOPES)
         # Save the credentials for the next run
         with open("token.json", "w") as token:
             token.write(creds.to_json())
