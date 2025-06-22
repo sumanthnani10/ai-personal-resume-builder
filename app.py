@@ -450,19 +450,29 @@ personal_data = {
 
 
 def get_google_creds(SCOPES):
+    """
+    Returns a google.oauth2.service_account.Credentials object for the given scopes.
+    - If ENVIRONMENT=local, loads from 'service_account.json'.
+    - Else, loads from SERVICE_ACCOUNT_JSON env var (the full JSON as a string).
+    """
+    from google.oauth2.service_account import Credentials
+    import tempfile
+    import json
     environment = os.getenv("ENVIRONMENT", "local").lower()
     if environment == "local":
-        creds_path = "creds.json"
+        creds_path = "service_account.json"
+        if not os.path.exists(creds_path):
+            raise RuntimeError(f"Service account file '{creds_path}' not found!")
+        creds = Credentials.from_service_account_file(creds_path, scopes=SCOPES)
     else:
-        creds_json = os.getenv("CREDS_JSON")
-        if not creds_json:
-            raise RuntimeError("CREDS_JSON environment variable not set!")
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-        tmp.write(creds_json.encode())
-        tmp.close()
-        creds_path = tmp.name
-    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-    creds = flow.run_local_server(port=0)
+        sa_json = os.getenv("SERVICE_ACCOUNT_JSON")
+        if not sa_json:
+            raise RuntimeError("SERVICE_ACCOUNT_JSON environment variable not set!")
+        # Write to a temp file for compatibility
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
+            tmp.write(sa_json.encode())
+            tmp.flush()
+            creds = Credentials.from_service_account_file(tmp.name, scopes=SCOPES)
     return creds
 
 
@@ -854,24 +864,23 @@ def generate_and_download_resume_pdf_via_duplicate(
     4. Deletes the duplicate.
     Returns: (pdf_bytes, duplicate_doc_id)
     """
-
-    from google.oauth2.service_account import Credentials
-
+    import io
+    import time
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
     SCOPES = [
         "https://www.googleapis.com/auth/documents",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+    creds = get_google_creds(SCOPES)
     docs_service = build("docs", "v1", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
-
     # 1. Duplicate the doc
     copied_file = drive_service.files().copy(
         fileId=template_doc_id,
         body={"name": f"Resume Export {int(time.time())}"}
     ).execute()
     duplicate_doc_id = copied_file['id']
-
     # 2. Replace placeholders in the duplicate
     requests = []
     for ph, val in placeholder_map.items():
@@ -886,7 +895,6 @@ def generate_and_download_resume_pdf_via_duplicate(
             documentId=duplicate_doc_id,
             body={"requests": requests}
         ).execute()
-
     # 3. Download as PDF
     request = drive_service.files().export_media(fileId=duplicate_doc_id, mimeType='application/pdf')
     fh = io.BytesIO()
@@ -896,10 +904,8 @@ def generate_and_download_resume_pdf_via_duplicate(
         status, done = downloader.next_chunk()
     fh.seek(0)
     pdf_bytes = fh.read()
-
     # 4. Delete the duplicate
     drive_service.files().delete(fileId=duplicate_doc_id).execute()
-
     return pdf_bytes
 
 if __name__ == "__main__":
