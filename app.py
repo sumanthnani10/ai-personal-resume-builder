@@ -15,6 +15,11 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+import io
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from googleapiclient.http import MediaIoBaseDownload
+import time
 import tempfile
 
 # Set up logging
@@ -445,8 +450,6 @@ personal_data = {
 
 
 def get_google_creds(SCOPES):
-    import os, json
-    from google_auth_oauthlib.flow import InstalledAppFlow
     environment = os.getenv("ENVIRONMENT", "local").lower()
     if environment == "local":
         creds_path = "creds.json"
@@ -454,7 +457,6 @@ def get_google_creds(SCOPES):
         creds_json = os.getenv("CREDS_JSON")
         if not creds_json:
             raise RuntimeError("CREDS_JSON environment variable not set!")
-        # Write creds_json to a temp file
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
         tmp.write(creds_json.encode())
         tmp.close()
@@ -462,83 +464,6 @@ def get_google_creds(SCOPES):
     flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
     creds = flow.run_local_server(port=0)
     return creds
-
-
-def replace_placeholder_with_text(
-    doc_id, placeholder, replacement, font_family="Arial", font_size=11, bold=False
-):
-    """
-    Replaces all instances of a placeholder (e.g., {{SKILLS}}) in the Google Doc with the given replacement text,
-    applying the specified font size and bold formatting. (fontFamily is not always supported by the API)
-    """
-    from googleapiclient.discovery import build
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from google.auth.transport.requests import Request
-    import os
-
-    SCOPES = [
-        "https://www.googleapis.com/auth/documents",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            creds = get_google_creds(SCOPES)
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-    service = build("docs", "v1", credentials=creds)
-
-    # Fetch the document content
-    doc = service.documents().get(documentId=doc_id).execute()
-    requests = []
-    placeholder_pattern = f"{{{{{placeholder}}}}}"
-    content = doc.get("body", {}).get("content", [])
-    for idx, value in enumerate(content):
-        if "paragraph" in value:
-            for elem in value["paragraph"].get("elements", []):
-                text_run = elem.get("textRun")
-                if text_run and placeholder_pattern in text_run.get("content", ""):
-                    start_index = elem["startIndex"]
-                    end_index = elem["endIndex"]
-                    # Delete the placeholder text
-                    requests.append({
-                        "deleteContentRange": {
-                            "range": {
-                                "startIndex": start_index,
-                                "endIndex": end_index
-                            }
-                        }
-                    })
-                    # Insert the replacement text
-                    requests.append({
-                        "insertText": {
-                            "location": {"index": start_index},
-                            "text": replacement
-                        }
-                    })
-                    # Only set bold and fontSize (fontFamily is not always supported)
-                    requests.append({
-                        "updateTextStyle": {
-                            "range": {
-                                "startIndex": start_index,
-                                "endIndex": start_index + len(replacement)
-                            },
-                            "textStyle": {
-                                "bold": bold,
-                                "fontSize": {"magnitude": font_size, "unit": "PT"}
-                            },
-                            "fields": "bold,fontSize"
-                        }
-                    })
-    if requests:
-        service.documents().batchUpdate(
-            documentId=doc_id, body={"requests": requests}
-        ).execute()
 
 
 # Save personal data to JSON
@@ -919,71 +844,6 @@ def main():
                 mime="text/plain",
             )
 
-# --- Google Docs API helper functions ---
-def get_document_content(doc_id):
-
-    """
-    Fetches the content of a Google Doc by its ID using the Google Docs API.
-    Returns the document object.
-    NOTE: If you change SCOPES, delete token.json and re-authenticate.
-    """
-    # Use full edit scope so batchUpdate works
-    SCOPES = [
-        "https://www.googleapis.com/auth/documents",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            creds = get_google_creds(SCOPES)
-        # Save the credentials for the next run
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-    service = build("docs", "v1", credentials=creds)
-    doc = service.documents().get(documentId=doc_id).execute()
-    return doc
-
-def find_placeholders(doc):
-    """
-    Finds all placeholders in the Google Doc (e.g., {{SKILLS}}, {{EXPERIENCE1}}).
-    Returns a set of unique placeholder names.
-    """
-    placeholders = set()
-    def extract_text_elements(elements):
-        for value in elements:
-            if "paragraph" in value:
-                for elem in value["paragraph"].get("elements", []):
-                    text_run = elem.get("textRun")
-                    if text_run:
-                        matches = re.findall(r"{{(.*?)}}", text_run.get("content", ""))
-                        placeholders.update(matches)
-            if "table" in value:
-                for row in value["table"]["tableRows"]:
-                    for cell in row["tableCells"]:
-                        extract_text_elements(cell["content"])
-            if "tableOfContents" in value:
-                extract_text_elements(value["tableOfContents"]["content"])
-    extract_text_elements(doc.get("body", {}).get("content", []))
-    return sorted(list(placeholders))
-
-def extract_doc_id(input_str):
-    """
-    Extracts the Google Doc ID from a full URL or returns the input if it's already an ID.
-    """
-    import re
-    match = re.search(r"/d/([a-zA-Z0-9_-]+)", input_str)
-    if match:
-        return match.group(1)
-    # If input is just the ID
-    if re.match(r"^[a-zA-Z0-9_-]{20,}$", input_str):
-        return input_str
-    return None
-
 def generate_and_download_resume_pdf_via_duplicate(
     template_doc_id, placeholder_map, font_family="Arial", font_size=11, bold=False
 ):
@@ -994,32 +854,16 @@ def generate_and_download_resume_pdf_via_duplicate(
     4. Deletes the duplicate.
     Returns: (pdf_bytes, duplicate_doc_id)
     """
-    import io
-    from googleapiclient.discovery import build
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.http import MediaIoBaseDownload
-    import os
-    import time
+
+    from google.oauth2.service_account import Credentials
 
     SCOPES = [
         "https://www.googleapis.com/auth/documents",
-        "https://www.googleapis.com/auth/drive"
+        "https://www.googleapis.com/auth/drive",
     ]
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    if creds is None or not creds.valid:
-        if os.path.exists("creds.json"):
-            flow = InstalledAppFlow.from_client_secrets_file("creds.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-            with open("token.json", "w") as token:
-                token.write(creds.to_json())
-        else:
-            raise RuntimeError("Missing creds.json for Google API authentication.")
-
-    drive_service = build('drive', 'v3', credentials=creds)
-    docs_service = build('docs', 'v1', credentials=creds)
+    creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+    docs_service = build("docs", "v1", credentials=creds)
+    drive_service = build("drive", "v3", credentials=creds)
 
     # 1. Duplicate the doc
     copied_file = drive_service.files().copy(

@@ -160,3 +160,4 @@ fine_tuned_model/
 personal_data.json
 creds.json
 token.json
+service_account.json
